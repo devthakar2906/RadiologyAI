@@ -22,8 +22,8 @@ export default function LoginPage() {
           <input className="input" placeholder="Password" type="password" required onChange={(e) => setForm({ ...form, password: e.target.value })} />
           <button className="primary-button w-full" type="submit">Login</button>
         </form>
-        <p className="mt-4 text-sm text-slate-300">
-          Need an account? <Link className="text-sky-300" to="/signup">Sign up</Link>
+        <p className="mt-4 text-sm text-slate-600 dark:text-slate-300">
+          Need an account? <Link className="text-slate-700 dark:text-sky-300" to="/signup">Sign up</Link>
         </p>
       </AuthCard>
     </main>

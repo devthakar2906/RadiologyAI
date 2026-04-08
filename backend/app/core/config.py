@@ -27,11 +27,10 @@ class Settings(BaseSettings):
         alias="ENCRYPTION_KEY",
     )
     stt_model: str = Field(default="google/medasr", alias="STT_MODEL")
-    summarization_model: str = Field(
-        default="Falconsai/medical_summarization",
-        alias="SUMMARIZATION_MODEL",
-    )
+    llm_model: str = Field(default="meta-llama/Llama-3.3-70B-Instruct", alias="LLM_MODEL")
     hf_token: str | None = Field(default=None, alias="HF_TOKEN")
+    radreport_base_url: str = Field(default="https://radreport.org", alias="RADREPORT_BASE_URL")
+    template_cache_dir: str = Field(default=str(BASE_DIR / "templates"), alias="TEMPLATE_CACHE_DIR")
     uploads_dir: str = Field(default=str(BASE_DIR / "uploads"), alias="UPLOADS_DIR")
     frontend_url: str = Field(default="http://localhost:9997", alias="FRONTEND_URL")
     model_config = SettingsConfigDict(env_file=str(ENV_FILE), env_file_encoding="utf-8", extra="ignore")
@@ -41,4 +40,5 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     settings = Settings()
     Path(settings.uploads_dir).mkdir(parents=True, exist_ok=True)
+    Path(settings.template_cache_dir).mkdir(parents=True, exist_ok=True)
     return settings

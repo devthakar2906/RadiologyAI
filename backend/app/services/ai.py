@@ -1,44 +1,14 @@
 import html
-import json
-import os
+import mimetypes
 import re
-from functools import lru_cache
+from pathlib import Path
 
-import librosa
-from transformers import pipeline
+import httpx
 
 from app.core.config import get_settings
 
 
 settings = get_settings()
-
-if settings.hf_token:
-    os.environ["HF_TOKEN"] = settings.hf_token
-
-
-@lru_cache
-def get_asr_pipeline():
-    return pipeline(
-        "automatic-speech-recognition",
-        model=settings.stt_model,
-        token=settings.hf_token,
-        trust_remote_code=True,
-    )
-
-
-@lru_cache
-def get_summarizer():
-    return pipeline("summarization", model=settings.summarization_model, token=settings.hf_token)
-
-
-def transcribe_audio(audio_path: str) -> str:
-    asr = get_asr_pipeline()
-    # MedASR expects mono 16kHz audio. librosa normalizes the input to that shape/rate.
-    speech, sample_rate = librosa.load(audio_path, sr=16000, mono=True)
-    result = asr({"array": speech, "sampling_rate": sample_rate}, chunk_length_s=20, stride_length_s=2)
-    if isinstance(result, dict):
-        return clean_transcription_text(result.get("text", ""))
-    return clean_transcription_text(str(result))
 
 
 def clean_transcription_text(value: str) -> str:
@@ -48,44 +18,76 @@ def clean_transcription_text(value: str) -> str:
     return text
 
 
-def summarize_transcription(transcription: str) -> dict:
-    cleaned = clean_transcription_text(transcription)
-    prompt = (
-        "Summarize this radiology transcription into findings, impression, and recommendations. "
-        "Keep the language clinical and concise. "
-        f"Transcription: {cleaned}"
-    )
-    summarizer = get_summarizer()
-    input_words = max(len(cleaned.split()), 1)
-    max_new_tokens = min(96, max(24, input_words // 2))
-    min_new_tokens = min(24, max(8, input_words // 5))
-    summary = summarizer(
-        prompt,
-        max_new_tokens=max_new_tokens,
-        min_new_tokens=min_new_tokens,
-        do_sample=False,
-    )[0]["summary_text"]
-    try:
-        parsed = json.loads(summary)
-    except json.JSONDecodeError:
-        parsed = {
-            "findings": cleaned[:400] or "No findings available.",
-            "impression": _derive_impression(cleaned, summary),
-            "recommendations": "Clinical correlation recommended.",
-        }
-
+def _get_headers(content_type: str = "application/json") -> dict[str, str]:
+    if not settings.hf_token:
+        raise RuntimeError("HF_TOKEN is not configured.")
     return {
-        "findings": clean_transcription_text(parsed.get("findings", "")) or "No findings available.",
-        "impression": clean_transcription_text(parsed.get("impression", "")) or _derive_impression(cleaned, summary),
-        "recommendations": parsed.get("recommendations", "Clinical correlation recommended."),
+        "Authorization": f"Bearer {settings.hf_token}",
+        "Content-Type": content_type,
     }
 
 
-def _derive_impression(transcription: str, summary: str) -> str:
-    cleaned_summary = clean_transcription_text(summary)
-    if "json keys" in cleaned_summary.lower() or cleaned_summary.lower().startswith("a radiology report"):
-        cleaned_summary = ""
-    if cleaned_summary:
-        return cleaned_summary[:250]
-    sentence = transcription.split(".")[0].strip()
-    return sentence[:250] if sentence else "No impression available."
+def _parse_generated_text(payload) -> str:
+    if isinstance(payload, dict):
+        if isinstance(payload.get("text"), str):
+            return payload["text"]
+        if isinstance(payload.get("generated_text"), str):
+            return payload["generated_text"]
+        if "error" in payload:
+            raise RuntimeError(str(payload["error"]))
+
+    if isinstance(payload, list):
+        for item in payload:
+            if isinstance(item, dict):
+                if isinstance(item.get("text"), str):
+                    return item["text"]
+                if isinstance(item.get("generated_text"), str):
+                    return item["generated_text"]
+
+    if isinstance(payload, str):
+        return payload
+
+    raise RuntimeError("Unexpected response from Hugging Face API.")
+
+
+def transcribe_audio(audio_path: str) -> str:
+    audio_file = Path(audio_path)
+    mime_type = mimetypes.guess_type(audio_file.name)[0] or "application/octet-stream"
+
+    with audio_file.open("rb") as source:
+        response = httpx.post(
+            f"https://api-inference.huggingface.co/models/{settings.stt_model}",
+            headers=_get_headers(mime_type),
+            params={"wait_for_model": "true"},
+            content=source.read(),
+            timeout=120.0,
+        )
+    response.raise_for_status()
+    return clean_transcription_text(_parse_generated_text(response.json()))
+
+
+def refine_with_medasr(text: str) -> str:
+    cleaned = clean_transcription_text(text)
+    if not cleaned:
+        return ""
+
+    prompt = (
+        "You are a medical ASR expert.\n\n"
+        "Correct this radiology dictation. Preserve clinical meaning, measurements, and anatomy. "
+        "Return only the corrected dictation text.\n\n"
+        f"{cleaned}"
+    )
+
+    try:
+        response = httpx.post(
+            f"https://api-inference.huggingface.co/models/{settings.stt_model}",
+            headers=_get_headers(),
+            params={"wait_for_model": "true"},
+            json={"inputs": prompt},
+            timeout=120.0,
+        )
+        response.raise_for_status()
+        refined = clean_transcription_text(_parse_generated_text(response.json()))
+        return refined or cleaned
+    except Exception:
+        return cleaned

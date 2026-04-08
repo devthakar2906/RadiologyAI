@@ -11,12 +11,20 @@ export default function DashboardPage() {
   const [reports, setReports] = useState([]);
   const [selectedReport, setSelectedReport] = useState(null);
   const [search, setSearch] = useState("");
-  const [theme, setTheme] = useState(localStorage.getItem("theme") || "dark");
+  const [theme, setTheme] = useState(() => localStorage.getItem("theme") || "dark");
   const [loading, setLoading] = useState(true);
   const [editableReport, setEditableReport] = useState(null);
+  const [doctorOptions, setDoctorOptions] = useState([]);
+  const [doctorFilter, setDoctorFilter] = useState("");
+  const [isSavingReport, setIsSavingReport] = useState(false);
 
   useEffect(() => {
-    document.documentElement.classList.toggle("light", theme === "light");
+    const root = document.documentElement;
+    if (theme === "dark") {
+      root.classList.add("dark");
+    } else {
+      root.classList.remove("dark");
+    }
     localStorage.setItem("theme", theme);
   }, [theme]);
 
@@ -33,10 +41,13 @@ export default function DashboardPage() {
     }
   }, [selectedReport]);
 
-  const fetchReports = async (searchTerm = "") => {
+  const fetchReports = async (searchTerm = "", selectedDoctorId = doctorFilter) => {
     try {
       setLoading(true);
-      const { data } = await api.get("/reports", { params: searchTerm ? { search: searchTerm } : {} });
+      const params = {};
+      if (searchTerm) params.search = searchTerm;
+      if (selectedDoctorId) params.doctor_id = selectedDoctorId;
+      const { data } = await api.get("/reports", { params });
       setReports(data);
       if (!selectedReport && data[0]) {
         setSelectedReport(data[0]);
@@ -52,6 +63,21 @@ export default function DashboardPage() {
     fetchReports();
   }, []);
 
+  useEffect(() => {
+    const fetchDoctors = async () => {
+      if (user?.role !== "admin") {
+        return;
+      }
+      try {
+        const { data } = await api.get("/doctors");
+        setDoctorOptions(data);
+      } catch {
+        toast.error("Failed to load doctors");
+      }
+    };
+    fetchDoctors();
+  }, [user?.role]);
+
   const handleDelete = async (id) => {
     try {
       await api.delete(`/reports/${id}`);
@@ -64,13 +90,95 @@ export default function DashboardPage() {
     }
   };
 
+  const handleSaveReport = async () => {
+    if (!editableReport) {
+      return;
+    }
+    try {
+      setIsSavingReport(true);
+      const { data } = await api.post(`/reports/save`, {
+        report_id: editableReport.id || null,
+        transcription: editableReport.transcription,
+        report: editableReport.report
+      });
+      setEditableReport(data);
+      setSelectedReport(data);
+      setReports((current) => {
+        const existingIndex = current.findIndex((report) => report.id === data.id);
+        if (existingIndex >= 0) {
+          return current.map((report) => (report.id === data.id ? data : report));
+        }
+        const filtered = current.filter((report) => report.id !== editableReport.id);
+        return [data, ...filtered];
+      });
+      toast.success("Report saved");
+    } catch (error) {
+      toast.error(error.response?.data?.detail || "Failed to save report");
+    } finally {
+      setIsSavingReport(false);
+    }
+  };
+
+  const updateReportSection = (path, nextValue) => {
+    setEditableReport((current) => {
+      if (!current) return current;
+      const nextReport = structuredClone(current.report);
+      let cursor = nextReport;
+      for (let index = 0; index < path.length - 1; index += 1) {
+        cursor = cursor[path[index]];
+      }
+      cursor[path[path.length - 1]] = nextValue;
+      return { ...current, report: nextReport };
+    });
+  };
+
+  const renderReportFields = (node, path = [], depth = 0) =>
+    Object.entries(node)
+      .filter(([section]) => !(depth === 0 && section === "Transcription"))
+      .map(([section, value]) => {
+      const nextPath = [...path, section];
+      const titleClass = depth === 0 ? "section-title section-title-main" : "section-title section-title-sub";
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        return (
+          <div key={nextPath.join(".")} className="space-y-4">
+            <p className={titleClass}>{section}</p>
+            <div className={depth === 0 ? "report-group-main" : "report-group-sub"}>
+              {renderReportFields(value, nextPath, depth + 1)}
+            </div>
+          </div>
+        );
+      }
+
+      return (
+        <div key={nextPath.join(".")} className={depth === 0 ? "report-item-main" : "report-item-sub"}>
+          <p className={titleClass}>
+            {depth === 0 ? section : `${section}:`}
+          </p>
+          <textarea
+            className={depth === 0 ? "report-editor report-editor-main" : "report-editor report-editor-sub"}
+            value={value ?? ""}
+            onChange={(event) => updateReportSection(nextPath, event.target.value)}
+          />
+        </div>
+      );
+    });
+
+  const getPreviewText = (report) => {
+    const flatten = (node) => {
+      if (node && typeof node === "object" && !Array.isArray(node)) {
+        return Object.values(node).flatMap(flatten);
+      }
+      return [String(node || "")];
+    };
+    return report.report.Impression || report.report.Findings || flatten(report.report).find(Boolean) || "Untitled report";
+  };
+
   const summaryCards = useMemo(
     () => [
       { label: "Role", value: user?.role || "doctor" },
-      { label: "Reports", value: reports.length },
-      { label: "Search", value: search || "All" }
+      { label: "Reports", value: reports.length }
     ],
-    [reports.length, search, user?.role]
+    [reports.length, user?.role]
   );
 
   return (
@@ -78,9 +186,8 @@ export default function DashboardPage() {
       <section className="hero-panel">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
-            <p className="text-sm uppercase tracking-[0.3em] text-sky-300">Radiology AI Workspace</p>
-            <h1 className="mt-3 text-4xl font-bold text-white">Voice dictation to structured report, locally powered.</h1>
-            <p className="mt-3 max-w-2xl text-slate-300">Upload audio, monitor asynchronous processing, review encrypted reports, and export clean PDFs for delivery.</p>
+            <p className="text-sm uppercase tracking-[0.3em] text-slate-500 dark:text-sky-300">Radiology AI Workspace</p>
+            <h1 className="mt-3 text-4xl font-bold text-slate-900 dark:text-white">Hello, {user?.name || "Doctor"}.</h1>
           </div>
           <div className="flex gap-3">
             <button className="icon-button" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
@@ -96,15 +203,40 @@ export default function DashboardPage() {
           {summaryCards.map((card) => (
             <div key={card.label} className="stat-card">
               <p className="text-sm text-slate-400">{card.label}</p>
-              <p className="mt-2 text-2xl font-bold text-white">{card.value}</p>
+              <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white">{card.value}</p>
             </div>
           ))}
+          <div className="stat-card">
+            <p className="text-sm text-slate-400">{user?.role === "admin" ? "Doctor" : "Search"}</p>
+            {user?.role === "admin" ? (
+              <select
+                className="input mt-2"
+                value={doctorFilter}
+                onChange={(e) => {
+                  const nextDoctor = e.target.value;
+                  setDoctorFilter(nextDoctor);
+                  fetchReports(search, nextDoctor);
+                }}
+              >
+                <option value="">All</option>
+                {doctorOptions.map((doctor) => (
+                  <option key={doctor.id} value={doctor.id}>
+                    {doctor.name}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <p className="mt-2 text-2xl font-bold text-slate-900 dark:text-white">{search || "All"}</p>
+            )}
+          </div>
         </div>
+
       </section>
 
       <section className="mt-8 grid gap-8 xl:grid-cols-[1.25fr_0.75fr]">
         <div className="space-y-8">
           <SpeechReportUI
+            theme={theme}
             onReportReady={(report) => {
               setSelectedReport(report);
               setEditableReport({
@@ -122,11 +254,25 @@ export default function DashboardPage() {
               <Search className="text-slate-400" size={18} />
               <input
                 className="input"
-                placeholder="Search by audio hash"
+                placeholder="Search by report words"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
               />
-              <button className="primary-button" onClick={() => fetchReports(search)}>Search</button>
+              {user?.role === "admin" ? (
+                <select
+                  className="input max-w-64"
+                  value={doctorFilter}
+                  onChange={(e) => setDoctorFilter(e.target.value)}
+                >
+                  <option value="">All Doctors</option>
+                  {doctorOptions.map((doctor) => (
+                    <option key={doctor.id} value={doctor.id}>
+                      {doctor.name}
+                    </option>
+                  ))}
+                </select>
+              ) : null}
+              <button className="primary-button" onClick={() => fetchReports(search, doctorFilter)}>Search</button>
             </div>
 
             <div className="space-y-3">
@@ -134,7 +280,7 @@ export default function DashboardPage() {
               {reports.map((report) => (
                 <div key={report.id} className="report-row">
                   <button className="flex-1 text-left" onClick={() => setSelectedReport(report)}>
-                    <p className="font-medium text-white">{report.report.impression}</p>
+                    <p className="font-medium text-slate-900 dark:text-white">{getPreviewText(report)}</p>
                     <p className="mt-1 text-xs text-slate-400">{new Date(report.created_at).toLocaleString()}</p>
                   </button>
                   <button className="icon-button" onClick={() => exportReportPdf(report)}>
@@ -150,65 +296,19 @@ export default function DashboardPage() {
         </div>
 
         <aside className="panel sticky top-6 h-fit">
-          <h2 className="text-2xl font-bold text-white">Structured Report</h2>
+          <h2 className="text-2xl font-bold text-slate-900 dark:text-white">Structured Report</h2>
           {editableReport ? (
             <div className="mt-6 space-y-5">
-              <div>
-                <p className="section-title">Findings</p>
-                <textarea
-                  className="report-editor"
-                  value={editableReport.report.findings}
-                  onChange={(event) =>
-                    setEditableReport({
-                      ...editableReport,
-                      report: { ...editableReport.report, findings: event.target.value }
-                    })
-                  }
-                />
+              {renderReportFields(editableReport.report)}
+              <div className="flex gap-3">
+                <button className="primary-button flex-1" onClick={handleSaveReport} disabled={isSavingReport}>
+                  {isSavingReport ? "Saving..." : "Save"}
+                </button>
+                <button className="primary-button flex-1" onClick={() => exportReportPdf(editableReport)}>
+                  <FileDown size={16} />
+                  Download PDF
+                </button>
               </div>
-              <div>
-                <p className="section-title">Impression</p>
-                <textarea
-                  className="report-editor"
-                  value={editableReport.report.impression}
-                  onChange={(event) =>
-                    setEditableReport({
-                      ...editableReport,
-                      report: { ...editableReport.report, impression: event.target.value }
-                    })
-                  }
-                />
-              </div>
-              <div>
-                <p className="section-title">Recommendations</p>
-                <textarea
-                  className="report-editor"
-                  value={editableReport.report.recommendations}
-                  onChange={(event) =>
-                    setEditableReport({
-                      ...editableReport,
-                      report: { ...editableReport.report, recommendations: event.target.value }
-                    })
-                  }
-                />
-              </div>
-              <div>
-                <p className="section-title">Transcription</p>
-                <textarea
-                  className="report-editor report-editor-transcription"
-                  value={editableReport.transcription}
-                  onChange={(event) =>
-                    setEditableReport({
-                      ...editableReport,
-                      transcription: event.target.value
-                    })
-                  }
-                />
-              </div>
-              <button className="primary-button w-full" onClick={() => exportReportPdf(editableReport)}>
-                <FileDown size={16} />
-                Download PDF
-              </button>
             </div>
           ) : (
             <p className="mt-6 text-slate-400">Generate or select a report to review the structured output.</p>

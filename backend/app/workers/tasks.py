@@ -15,7 +15,9 @@ logger = get_task_logger(__name__)
 def process_audio_task(self, *, audio_path: str, audio_hash: str, user_id: str):
     db = SessionLocal()
     try:
-        return process_audio_pipeline(db, audio_path=audio_path, audio_hash=audio_hash, user_id=user_id)
+        import asyncio
+
+        return asyncio.run(process_audio_pipeline(db, audio_path=audio_path, audio_hash=audio_hash, user_id=user_id))
     except Exception as exc:
         db.rollback()
         create_log(db, UUID(user_id), "process_audio", f"failed:{exc}")

@@ -27,8 +27,8 @@ export default function SignupPage() {
           </select>
           <button className="primary-button w-full" type="submit">Sign Up</button>
         </form>
-        <p className="mt-4 text-sm text-slate-300">
-          Already registered? <Link className="text-sky-300" to="/login">Login</Link>
+        <p className="mt-4 text-sm text-slate-600 dark:text-slate-300">
+          Already registered? <Link className="text-slate-700 dark:text-sky-300" to="/login">Login</Link>
         </p>
       </AuthCard>
     </main>

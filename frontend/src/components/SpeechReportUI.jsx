@@ -13,7 +13,7 @@ function htmlToPlainText(value) {
   return (container.textContent || container.innerText || "").replace(/\s+/g, " ").trim();
 }
 
-export default function SpeechReportUI({ onReportReady }) {
+export default function SpeechReportUI({ onReportReady, theme = "dark" }) {
   const [transcript, setTranscript] = useState("");
   const [isRecording, setIsRecording] = useState(false);
   const [audioFile, setAudioFile] = useState(null);
@@ -109,17 +109,25 @@ export default function SpeechReportUI({ onReportReady }) {
   const refineAudioTranscript = async (recordedFile) => {
     const formData = new FormData();
     formData.append("file", recordedFile);
+    const rawTranscript = htmlToPlainText(finalTranscriptRef.current || transcript);
+    if (rawTranscript) {
+      formData.append("raw_text", rawTranscript);
+    }
     try {
       setIsRefining(true);
+      setJobState("refining");
       const { data } = await api.post("/transcribe-audio", formData, {
         headers: { "Content-Type": "multipart/form-data" }
       });
-      if (data.transcription) {
-        finalTranscriptRef.current = data.transcription;
-        setTranscript(data.transcription);
+      const nextTranscript = data.refined_text || data.transcription || data.raw_text;
+      if (nextTranscript) {
+        finalTranscriptRef.current = nextTranscript;
+        setTranscript(nextTranscript);
+        setJobState("refined");
         toast.success("Transcript refined from full audio");
       }
     } catch (error) {
+      setJobState("failed");
       toast.error(error.response?.data?.detail || "Failed to refine transcript");
     } finally {
       setIsRefining(false);
@@ -164,23 +172,22 @@ export default function SpeechReportUI({ onReportReady }) {
     try {
       setIsGenerating(true);
       setJobState("processing");
-      const { data } = await api.post("/process-audio", formData, {
-        headers: { "Content-Type": "multipart/form-data" }
+      const { data } = await api.post("/generate-structured-report", {
+        findings: cleanedTranscript
       });
-      if (data.cached && data.data) {
-        onReportReady(data.data);
-        setJobState("completed");
-        toast.success("Loaded cached report");
-        return;
-      }
-      if (data.status === "completed" && data.data) {
-        onReportReady(data.data);
-        setJobState("completed");
-        toast.success("Report generated");
-        return;
-      }
-      setJobState(data.status);
-      pollStatus(data.job_id);
+      onReportReady({
+        id: crypto.randomUUID(),
+        transcription: cleanedTranscript,
+        report: data.structured_json,
+        template: data.study_type,
+        study_type: data.study_type,
+        formatted_report: data.formatted_report,
+        user_id: null,
+        audio_hash: "",
+        created_at: new Date().toISOString()
+      });
+      setJobState("completed");
+      toast.success("Report generated");
     } catch (error) {
       setJobState("failed");
       toast.error(error.response?.data?.detail || "Failed to start processing");
@@ -194,12 +201,20 @@ export default function SpeechReportUI({ onReportReady }) {
     [isRecording]
   );
 
+  const handleUploadChange = (event) => {
+    const nextFile = event.target.files?.[0] || null;
+    setAudioFile(nextFile);
+    if (nextFile) {
+      refineAudioTranscript(nextFile);
+    }
+  };
+
   return (
-    <div className={`rounded-[2rem] border border-white/10 bg-slate-950/70 p-6 transition-all ${recordingGlow}`}>
+    <div className={`rounded-[2rem] border p-6 transition-all ${theme === "light" ? "border-slate-200 bg-white/80 text-slate-900" : "border-white/10 bg-slate-950/70 text-white"} ${recordingGlow}`}>
       <div className="mb-6 flex items-center justify-between">
         <div>
-          <h2 className="text-2xl font-bold text-white">SpeechReportUI</h2>
-          <p className="mt-1 text-sm text-slate-400">Capture findings, edit the transcript, and send audio for AI reporting.</p>
+          <h2 className={`text-2xl font-bold ${theme === "light" ? "text-slate-900" : "text-white"}`}>SpeechReportUI</h2>
+          <p className={`mt-1 text-sm ${theme === "light" ? "text-slate-600" : "text-slate-400"}`}>Capture findings, edit the transcript, and send audio for AI reporting.</p>
         </div>
         <div className={`h-4 w-4 rounded-full ${isRecording ? "animate-pulse bg-emerald-400" : "bg-slate-600"}`} />
       </div>
@@ -216,7 +231,7 @@ export default function SpeechReportUI({ onReportReady }) {
         <label className="inline-flex cursor-pointer items-center gap-2 rounded-full bg-slate-800 px-4 py-2 font-medium text-slate-100 transition hover:bg-slate-700">
           <Upload size={18} />
           Upload Audio
-          <input type="file" accept="audio/*" className="hidden" onChange={(event) => setAudioFile(event.target.files?.[0] || null)} />
+          <input type="file" accept="audio/*" className="hidden" onChange={handleUploadChange} />
         </label>
         <button onClick={handleGenerate} className="inline-flex items-center gap-2 rounded-full bg-sky-500 px-4 py-2 font-medium text-white transition hover:bg-sky-400">
           <Sparkles size={18} />
@@ -224,7 +239,7 @@ export default function SpeechReportUI({ onReportReady }) {
         </button>
       </div>
 
-      <div className="mb-4 min-h-10 text-sm text-slate-400">
+      <div className={`mb-4 min-h-10 text-sm ${theme === "light" ? "text-slate-600" : "text-slate-400"}`}>
         {audioFile ? `Selected file: ${audioFile.name}` : "Upload a radiology dictation audio file to start backend processing."}
         {isRefining ? " Refining full-audio transcription..." : ""}
         {jobState ? ` Current job state: ${jobState}.` : ""}

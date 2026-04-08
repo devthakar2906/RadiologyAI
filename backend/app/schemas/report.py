@@ -1,20 +1,18 @@
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel
-
-
-class ReportPayload(BaseModel):
-    findings: str
-    impression: str
-    recommendations: str
 
 
 class ReportResponse(BaseModel):
     id: UUID
     user_id: UUID
     transcription: str
-    report: ReportPayload
+    report: dict[str, Any]
+    template: str | None = None
+    formatted_report: str | None = None
+    study_type: str | None = None
     audio_hash: str
     created_at: datetime
 
@@ -34,4 +32,28 @@ class JobStatusResponse(BaseModel):
 
 
 class TranscriptionResponse(BaseModel):
+    raw_text: str
+    refined_text: str
+    status: str = "success"
     transcription: str
+
+
+class DoctorFilterOption(BaseModel):
+    id: UUID
+    name: str
+
+
+class ReportUpdateRequest(BaseModel):
+    report_id: UUID | None = None
+    transcription: str
+    report: dict[str, Any]
+
+
+class GenerateStructuredReportRequest(BaseModel):
+    findings: str
+
+
+class GenerateStructuredReportResponse(BaseModel):
+    structured_json: dict[str, Any]
+    formatted_report: str
+    study_type: str
