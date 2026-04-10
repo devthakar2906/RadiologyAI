@@ -8,6 +8,7 @@ from app.core.config import get_settings
 from app.db.base import Base
 from app.db.session import engine
 from app.models import Log, Report, User
+from app.services.template_service import preload_cached_templates
 
 
 settings = get_settings()
@@ -26,6 +27,7 @@ app.add_middleware(
 def on_startup():
     with engine.begin() as connection:
         connection.execute(text("ALTER TABLE IF EXISTS logs ALTER COLUMN status TYPE TEXT"))
+    preload_cached_templates()
 
 
 app.include_router(auth_router, prefix=settings.api_v1_prefix)

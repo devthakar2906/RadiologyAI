@@ -5,7 +5,7 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from app.models import Report
-from app.services.ai import clean_transcription_text, transcribe_audio
+from app.services.ai import clean_transcription_text, transcribe_audio_async
 from app.services.logging_service import create_log
 from app.services.redis_client import set_cached_report
 from app.services.security import encrypt_text
@@ -13,7 +13,7 @@ from app.services.structured_report_service import generate_structured_report
 
 
 async def process_audio_pipeline(db: Session, *, audio_path: str, audio_hash: str, user_id: str) -> dict:
-    transcription = transcribe_audio(audio_path)
+    transcription = await transcribe_audio_async(audio_path)
     return await process_transcription_pipeline(
         db,
         transcription=transcription,

@@ -22,14 +22,14 @@ from app.schemas.report import (
     TranscriptionResponse,
 )
 from app.services.logging_service import create_log
-from app.services.redis_client import get_cached_report
+from app.services.redis_client import check_rate_limit, get_cached_report
 from app.services.report_pipeline import process_audio_pipeline, process_transcription_pipeline
 from app.services.security import decrypt_text, encrypt_text, generate_audio_hash
-from app.services.ai import refine_with_medasr, transcribe_audio
+from app.services.ai import refine_with_medasr_async, transcribe_audio_async
 from app.services.formatter import format_report
 from app.services.structured_report_service import generate_structured_report
 from app.workers.celery_app import celery_app
-from app.workers.tasks import process_audio_task
+from app.workers.tasks import process_audio_task, process_text_task
 
 
 settings = get_settings()
@@ -69,6 +69,14 @@ async def process_audio(
     current_user: User = Depends(require_role("doctor", "admin")),
 ):
     cleaned_text = (transcription_text or "").strip()
+    rate_key = f"rate:process-audio:{current_user.id}"
+
+    if not check_rate_limit(
+        key=rate_key,
+        limit=settings.transcription_rate_limit_count,
+        window_seconds=settings.transcription_rate_limit_window_seconds,
+    ):
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Too many transcription requests")
 
     if file is None and not cleaned_text:
         raise HTTPException(
@@ -81,22 +89,8 @@ async def process_audio(
         cached = get_cached_report(text_hash)
         if cached:
             return ProcessAudioResponse(status="completed", cached=True, data=ReportResponse(**cached))
-
-        try:
-            payload = await process_transcription_pipeline(
-                db,
-                transcription=cleaned_text,
-                user_id=str(current_user.id),
-                audio_path="manual-text",
-                audio_hash=text_hash,
-            )
-            return ProcessAudioResponse(status="completed", cached=False, data=ReportResponse(**payload))
-        except Exception as exc:
-            create_log(db, current_user.id, "process_text_report", f"failed:{exc}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Text report generation failed: {exc}",
-            ) from exc
+        task = process_text_task.delay(transcription=cleaned_text, audio_hash=text_hash, user_id=str(current_user.id))
+        return ProcessAudioResponse(job_id=task.id, status="queued", cached=False)
 
     content = await file.read()
     if not content:
@@ -110,22 +104,6 @@ async def process_audio(
     destination = Path(settings.uploads_dir) / f"{audio_hash}_{file.filename}"
     destination.write_bytes(content)
 
-    if not _has_active_worker():
-        try:
-            payload = await process_audio_pipeline(
-                db,
-                audio_path=str(destination),
-                audio_hash=audio_hash,
-                user_id=str(current_user.id),
-            )
-            return ProcessAudioResponse(status="completed", cached=False, data=ReportResponse(**payload))
-        except Exception as exc:
-            create_log(db, current_user.id, "process_audio", f"failed:{exc}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Audio processing failed: {exc}",
-            ) from exc
-
     task = process_audio_task.delay(audio_path=str(destination), audio_hash=audio_hash, user_id=str(current_user.id))
     return ProcessAudioResponse(job_id=task.id, status="queued", cached=False)
 
@@ -135,6 +113,14 @@ async def generate_structured_report_endpoint(
     payload: GenerateStructuredReportRequest,
     current_user: User = Depends(require_role("doctor", "admin")),
 ):
+    rate_key = f"rate:generate-structured-report:{current_user.id}"
+    if not check_rate_limit(
+        key=rate_key,
+        limit=settings.transcription_rate_limit_count,
+        window_seconds=settings.transcription_rate_limit_window_seconds,
+    ):
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Too many report generation requests")
+
     result = await generate_structured_report(payload.findings)
     return GenerateStructuredReportResponse(
         structured_json=result["structured_json"],
@@ -149,6 +135,14 @@ async def transcribe_audio_endpoint(
     raw_text: str | None = Form(default=None),
     current_user: User = Depends(require_role("doctor", "admin")),
 ):
+    rate_key = f"rate:transcribe-audio:{current_user.id}"
+    if not check_rate_limit(
+        key=rate_key,
+        limit=settings.transcription_rate_limit_count,
+        window_seconds=settings.transcription_rate_limit_window_seconds,
+    ):
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Too many transcription requests")
+
     content = await file.read()
     if not content:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empty audio file")
@@ -158,8 +152,8 @@ async def transcribe_audio_endpoint(
     destination.write_bytes(content)
 
     try:
-        raw_transcription = (raw_text or "").strip() or transcribe_audio(str(destination))
-        refined_transcription = refine_with_medasr(raw_transcription)
+        raw_transcription = (raw_text or "").strip() or await transcribe_audio_async(str(destination))
+        refined_transcription = await refine_with_medasr_async(raw_transcription)
         return TranscriptionResponse(
             raw_text=raw_transcription,
             refined_text=refined_transcription,
@@ -179,11 +173,13 @@ async def transcribe_audio_endpoint(
 @router.get("/status/{job_id}", response_model=JobStatusResponse)
 def get_job_status(job_id: str, current_user: User = Depends(require_role("doctor", "admin"))):
     result = AsyncResult(job_id, app=process_audio_task.app)
-    if result.successful():
-        return JobStatusResponse(job_id=job_id, status="completed", result=ReportResponse(**result.result))
-    if result.failed():
-        return JobStatusResponse(job_id=job_id, status="failed", error=str(result.result))
-    return JobStatusResponse(job_id=job_id, status=result.status.lower())
+    return _build_task_status_response(job_id, result)
+
+
+@router.get("/task-status/{task_id}", response_model=JobStatusResponse)
+def get_task_status(task_id: str, current_user: User = Depends(require_role("doctor", "admin"))):
+    result = AsyncResult(task_id, app=process_audio_task.app)
+    return _build_task_status_response(task_id, result)
 
 
 @router.get("/reports", response_model=list[ReportResponse])
@@ -228,6 +224,19 @@ def _infer_study_type_from_sections(report_sections: dict[str, str]) -> str | No
     if {"Alignment & Curvature", "Vertebral Bodies", "Intervertebral Discs", "Spinal Canal & Nerves", "Facet Joints"}.issubset(keys):
         return "MRI Spine"
     return "General Radiology"
+
+
+def _build_task_status_response(job_id: str, result: AsyncResult) -> JobStatusResponse:
+    state = (result.status or "").lower()
+    if result.successful():
+        return JobStatusResponse(job_id=job_id, status="completed", result=ReportResponse(**result.result))
+    if result.failed():
+        return JobStatusResponse(job_id=job_id, status="failed", error=str(result.result))
+    if state == "started":
+        state = "processing"
+    elif state == "received":
+        state = "pending"
+    return JobStatusResponse(job_id=job_id, status=state or "pending")
 
 
 @router.get("/doctors", response_model=list[DoctorFilterOption])

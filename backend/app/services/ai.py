@@ -1,3 +1,4 @@
+import asyncio
 import html
 import mimetypes
 import re
@@ -50,44 +51,45 @@ def _parse_generated_text(payload) -> str:
     raise RuntimeError("Unexpected response from Hugging Face API.")
 
 
-def transcribe_audio(audio_path: str) -> str:
+async def _request_with_retry(*, content=None, json_body=None, content_type: str) -> str:
+    last_error: Exception | None = None
+
+    for attempt in range(settings.hf_max_retries):
+        try:
+            async with httpx.AsyncClient(timeout=settings.hf_request_timeout_seconds) as client:
+                response = await client.post(
+                    f"https://api-inference.huggingface.co/models/{settings.stt_model}",
+                    headers=_get_headers(content_type),
+                    params={"wait_for_model": "true"},
+                    content=content,
+                    json=json_body,
+                )
+                response.raise_for_status()
+                return clean_transcription_text(_parse_generated_text(response.json()))
+        except Exception as exc:
+            last_error = exc
+            if attempt == settings.hf_max_retries - 1:
+                break
+            await asyncio.sleep(min(2 ** attempt, 8))
+
+    raise RuntimeError(f"Hugging Face request failed: {last_error}") from last_error
+
+
+async def transcribe_audio_async(audio_path: str) -> str:
     audio_file = Path(audio_path)
     mime_type = mimetypes.guess_type(audio_file.name)[0] or "application/octet-stream"
+    return await _request_with_retry(content=audio_file.read_bytes(), content_type=mime_type)
 
-    with audio_file.open("rb") as source:
-        response = httpx.post(
-            f"https://api-inference.huggingface.co/models/{settings.stt_model}",
-            headers=_get_headers(mime_type),
-            params={"wait_for_model": "true"},
-            content=source.read(),
-            timeout=120.0,
-        )
-    response.raise_for_status()
-    return clean_transcription_text(_parse_generated_text(response.json()))
+
+def transcribe_audio(audio_path: str) -> str:
+    return asyncio.run(transcribe_audio_async(audio_path))
+
+
+async def refine_with_medasr_async(text: str) -> str:
+    # MedASR is an ASR model, so text-only "refinement" should stay lightweight
+    # and deterministic instead of sending unsupported prompt-generation calls.
+    return clean_transcription_text(text)
 
 
 def refine_with_medasr(text: str) -> str:
-    cleaned = clean_transcription_text(text)
-    if not cleaned:
-        return ""
-
-    prompt = (
-        "You are a medical ASR expert.\n\n"
-        "Correct this radiology dictation. Preserve clinical meaning, measurements, and anatomy. "
-        "Return only the corrected dictation text.\n\n"
-        f"{cleaned}"
-    )
-
-    try:
-        response = httpx.post(
-            f"https://api-inference.huggingface.co/models/{settings.stt_model}",
-            headers=_get_headers(),
-            params={"wait_for_model": "true"},
-            json={"inputs": prompt},
-            timeout=120.0,
-        )
-        response.raise_for_status()
-        refined = clean_transcription_text(_parse_generated_text(response.json()))
-        return refined or cleaned
-    except Exception:
-        return cleaned
+    return asyncio.run(refine_with_medasr_async(text))

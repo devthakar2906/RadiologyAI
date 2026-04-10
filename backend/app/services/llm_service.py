@@ -47,7 +47,16 @@ def _sync_generate_report(prompt: str) -> str:
 
 
 async def generate_report(prompt: str) -> str:
-    return await asyncio.to_thread(_sync_generate_report, prompt)
+    last_error: Exception | None = None
+    for attempt in range(settings.hf_max_retries):
+        try:
+            return await asyncio.to_thread(_sync_generate_report, prompt)
+        except Exception as exc:
+            last_error = exc
+            if attempt == settings.hf_max_retries - 1:
+                break
+            await asyncio.sleep(min(2 ** attempt, 8))
+    raise RuntimeError(f"LLM report generation failed: {last_error}") from last_error
 
 
 def parse_llm_json(raw_text: str) -> dict:

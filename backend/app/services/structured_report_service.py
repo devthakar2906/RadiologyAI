@@ -8,6 +8,40 @@ from app.services.study_detector import detect_study_type
 from app.services.template_service import get_template
 
 
+def _first_meaningful_sentence(text: str) -> str:
+    sentences = [part.strip() for part in text.replace("\n", " ").split(".") if part.strip()]
+    return sentences[0] if sentences else text.strip()
+
+
+def _all_not_mentioned(node) -> bool:
+    if isinstance(node, dict):
+        return all(_all_not_mentioned(value) for value in node.values())
+    return str(node or "").strip().lower() in {"", "not mentioned"}
+
+
+def _heuristic_fill(template, findings: str):
+    summary = findings.strip() or "Not mentioned"
+    impression = _first_meaningful_sentence(summary) or "Not mentioned"
+
+    if isinstance(template, dict):
+        result = {}
+        for key, value in template.items():
+            normalized = key.lower()
+            if normalized == "impression":
+                result[key] = impression
+            elif normalized == "recommendations":
+                result[key] = "Clinical correlation recommended." if summary != "Not mentioned" else "Not mentioned"
+            elif normalized == "technique":
+                result[key] = "Not mentioned"
+            elif normalized == "findings":
+                result[key] = _heuristic_fill(value, findings)
+            else:
+                result[key] = _heuristic_fill(value, findings)
+        return result
+
+    return summary if summary else "Not mentioned"
+
+
 def _fill_missing(template, generated):
     if isinstance(template, dict):
         result = {}
@@ -39,7 +73,10 @@ async def _generate_with_retry(prompt: str) -> dict:
             "- No markdown, no explanation, no code fences.\n"
         )
         retry_raw = await generate_report(retry_prompt)
-        return parse_llm_json(retry_raw)
+        try:
+            return parse_llm_json(retry_raw)
+        except Exception:
+            return {}
 
 
 async def generate_structured_report(findings: str) -> dict:
@@ -49,6 +86,12 @@ async def generate_structured_report(findings: str) -> dict:
     prompt = build_prompt(template, cleaned)
     generated_json = await _generate_with_retry(prompt)
     structured = _fill_missing(template, generated_json)
+
+    # If the model returns empty or unusable content, fall back to a deterministic
+    # structure derived directly from the findings so the UI always has content.
+    if _all_not_mentioned(structured):
+        structured = _heuristic_fill(template, cleaned)
+
     structured["Transcription"] = cleaned or "Not mentioned"
 
     return {

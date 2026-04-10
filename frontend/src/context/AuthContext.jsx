@@ -5,22 +5,36 @@ import api, { setAuthToken } from "../api/client";
 const AuthContext = createContext(null);
 
 export function AuthProvider({ children }) {
-  const [token, setToken] = useState(localStorage.getItem("token"));
+  const [token, setToken] = useState(null);
   const [user, setUser] = useState(() => {
     const raw = localStorage.getItem("user");
     return raw ? JSON.parse(raw) : null;
   });
+  const [authReady, setAuthReady] = useState(false);
 
   useEffect(() => {
     setAuthToken(token);
   }, [token]);
 
+  useEffect(() => {
+    const restoreSession = async () => {
+      try {
+        const { data } = await api.get("/auth/me");
+        setUser(data);
+      } catch {
+        setUser(null);
+        localStorage.removeItem("user");
+      } finally {
+        setAuthReady(true);
+      }
+    };
+    restoreSession();
+  }, []);
+
   const persistAuth = (payload) => {
-    setToken(payload.access_token);
+    setToken(null);
     setUser(payload.user);
-    localStorage.setItem("token", payload.access_token);
     localStorage.setItem("user", JSON.stringify(payload.user));
-    setAuthToken(payload.access_token);
   };
 
   const login = async (values) => {
@@ -36,14 +50,15 @@ export function AuthProvider({ children }) {
   };
 
   const logout = () => {
-    setToken(null);
-    setUser(null);
-    localStorage.removeItem("token");
-    localStorage.removeItem("user");
-    setAuthToken(null);
+    api.post("/auth/logout").catch(() => null).finally(() => {
+      setToken(null);
+      setUser(null);
+      localStorage.removeItem("user");
+      setAuthToken(null);
+    });
   };
 
-  return <AuthContext.Provider value={{ token, user, login, signup, logout }}>{children}</AuthContext.Provider>;
+  return <AuthContext.Provider value={{ token, user, login, signup, logout, authReady }}>{children}</AuthContext.Provider>;
 }
 
 export function useAuth() {

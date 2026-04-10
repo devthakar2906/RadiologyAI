@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import toast from "react-hot-toast";
 import AuthCard from "../components/AuthCard";
 import { useAuth } from "../context/AuthContext";
 
@@ -10,8 +11,15 @@ export default function LoginPage() {
 
   const handleSubmit = async (event) => {
     event.preventDefault();
-    await login(form);
-    navigate("/");
+    try {
+      await login({
+        email: form.email.trim().toLowerCase(),
+        password: form.password
+      });
+      navigate("/report");
+    } catch (error) {
+      toast.error(error.response?.data?.detail || "Login failed");
+    }
   };
 
   return (

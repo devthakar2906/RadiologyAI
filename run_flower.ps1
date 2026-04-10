@@ -14,6 +14,5 @@ if (Test-Path $rootCelery) {
 
 Set-Location $repoPath
 $env:PYTHONPATH = $backendPath
-$workerConcurrency = if ($env:CELERY_WORKER_CONCURRENCY) { $env:CELERY_WORKER_CONCURRENCY } else { "4" }
-$workerPool = if ($env:CELERY_WORKER_POOL) { $env:CELERY_WORKER_POOL } else { "prefork" }
-& $celeryExe -A app.workers.celery_app.celery_app worker --pool=$workerPool --concurrency=$workerConcurrency --loglevel=info
+$flowerPort = if ($env:FLOWER_PORT) { $env:FLOWER_PORT } else { "5555" }
+& $celeryExe -A app.workers.celery_app.celery_app flower --port=$flowerPort

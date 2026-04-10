@@ -163,3 +163,11 @@ async def get_template(study_type: str, findings: str = "") -> tuple[dict, str]:
     cache_file.write_text(json.dumps(template, indent=2, ensure_ascii=False), encoding="utf-8")
     _memory_cache[cache_key] = template
     return template, source_url or "fallback"
+
+
+def preload_cached_templates() -> None:
+    for cache_file in TEMPLATE_CACHE_DIR.glob("*.json"):
+        try:
+            _memory_cache[cache_file.stem] = json.loads(cache_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue

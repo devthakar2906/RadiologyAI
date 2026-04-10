@@ -1,12 +1,13 @@
 # RadiologyAI
 
-RadiologyAI is a full-stack radiology dictation and structured reporting system built with FastAPI, React, PostgreSQL, Redis, and Celery. It supports doctor/admin authentication, encrypted report storage, browser-based live dictation, backend transcript refinement, structured report generation, PDF export, and searchable report history.
+RadiologyAI is a full-stack radiology dictation and structured reporting system built with FastAPI, React, PostgreSQL, Redis, and Celery. It supports doctor/admin authentication, live browser dictation, backend transcript refinement, structured report generation from findings, encrypted storage, report search, PDF export, and concurrent background processing.
 
 ## Quick Start
 
 ```powershell
 cd "E:\Dev Microsoft\ChatGPT\RadiologyAI"
 python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip setuptools wheel
 .\.venv\Scripts\python.exe -m pip install -r .\backend\requirements.txt
 cd .\frontend
 npm install
@@ -46,12 +47,20 @@ cd "E:\Dev Microsoft\ChatGPT\RadiologyAI\frontend"
 npm run dev
 ```
 
+Optional monitoring:
+
+```powershell
+cd "E:\Dev Microsoft\ChatGPT\RadiologyAI"
+powershell -ExecutionPolicy Bypass -File .\run_flower.ps1
+```
+
 ## Stack
 
 - Backend: FastAPI, PostgreSQL, SQLAlchemy, Redis, Celery, JWT auth, AES encryption, Alembic
-- Speech pipeline: browser live transcription for fast UI feedback, Hugging Face Inference API for MedASR refinement
-- Structured reporting: Hugging Face gated LLM API with RadReport-driven template caching
+- Speech: browser live transcription for UI responsiveness, Hugging Face Inference API for MedASR refinement
+- Structured reporting: Hugging Face gated LLM API with RadReport-based template caching
 - Frontend: React, Vite, Tailwind CSS, Quill, jsPDF
+- Monitoring: Flower for Celery task visibility
 
 ## Project Structure
 
@@ -68,56 +77,213 @@ RadiologyAI/
 ├── frontend/
 ├── run_backend.ps1
 ├── run_worker.ps1
+├── run_flower.ps1
 └── README.md
 ```
 
-## Current Workflow
+## Frontend Routes
 
-1. Click `Start Mic`
-2. Browser speech recognition fills the editor live
-3. Click `Stop Mic`
-4. The recorded audio is sent to the backend
-5. Backend returns:
+- `/` -> homepage / landing page
+- `/home` -> homepage / landing page
+- `/report` -> existing report dashboard and transcription workspace
+- `/app` -> alias to the same report dashboard
+- `/login` -> login page
+- `/signup` -> signup page
+
+After login, the app redirects to the report dashboard at `/report`.
+
+## Current User Flow
+
+1. Open the site on `/`
+2. Use the landing page to navigate into the reporting workspace
+3. Log in or sign up
+4. Dictate findings live in the browser or upload audio
+5. Click `Stop Mic` to trigger backend MedASR refinement
+6. Edit the transcript if needed
+7. Click `Generate Report`
+8. Backend detects study type, loads or reuses a cached template, and generates structured JSON
+9. Review the structured report on the right panel
+10. Save it to the database or download it as PDF
+
+Text-only usage is also supported: findings can be typed directly and converted to a structured report without recording audio.
+
+## End-to-End Technical Flow
+
+### 1. Authentication Flow
+
+1. User signs up or logs in through the frontend
+2. FastAPI validates credentials against PostgreSQL
+3. Passwords are verified using hashed password storage
+4. Backend issues a JWT access token
+5. Frontend stores:
+   - `token` in `localStorage`
+   - user profile in `localStorage`
+6. All protected API requests include `Authorization: Bearer <token>`
+
+### 2. Live Dictation Flow
+
+1. Browser Web Speech API captures interim and final speech locally
+2. Transcript is shown live inside the editor for immediate feedback
+3. No heavy backend inference happens during live typing/dictation
+4. This keeps the UI responsive and avoids unnecessary external API calls
+
+### 3. Stop / Audio Refinement Flow
+
+1. When the doctor clicks `Stop Mic`, the browser finalizes the recording
+2. The recorded audio file is sent to `POST /api/v1/transcribe-audio`
+3. Backend rate-limits the request per user
+4. Backend sends audio to Hugging Face Inference API using `google/medasr`
+5. If `raw_text` is already available from browser speech recognition, backend uses it as the initial base
+6. Backend runs one refinement pass through MedASR-style prompting
+7. Backend returns:
    - `raw_text`
    - `refined_text`
    - `status`
-6. The editor is updated with the refined text
-7. Click `Generate Report`
-8. Backend detects the study type, fetches or reuses a cached template, and generates a structured report
-9. Edit the structured report on the right if needed
-10. Click `Save` to persist it or `Download PDF` to export it
+   - `transcription`
+8. Frontend updates the editor with the refined text
 
-You can also upload an audio file directly, or type findings manually and generate a report without recording.
+### 4. Text-to-Structured-Report Flow
 
-## Features
+1. Doctor edits findings in the main editor
+2. Frontend sends findings to `POST /api/v1/generate-structured-report`
+3. Backend normalizes the text
+4. Backend detects likely study type from keywords
+5. Backend loads a cached template or fetches one from RadReport
+6. Backend builds a strict JSON prompt for the LLM
+7. Hugging Face gated LLM generates structured JSON
+8. Backend validates and parses the JSON
+9. If JSON is weak or unusable, backend falls back to deterministic structured output
+10. Frontend displays the structured report in the right panel
+
+### 5. Full Report Save Flow
+
+1. Doctor clicks `Save`
+2. Frontend sends:
+   - `report_id` when available
+   - current `transcription`
+   - current structured `report`
+3. Backend encrypts:
+   - transcription
+   - structured report JSON
+4. Backend inserts or updates the `reports` table
+5. Frontend updates the left-side history immediately with the saved record
+
+### 6. Async Audio-to-Report Flow
+
+1. Audio or text findings can also be sent to `POST /api/v1/process-audio`
+2. Backend computes a hash for caching/idempotency
+3. If a cached result exists in Redis, it returns immediately
+4. Otherwise:
+   - audio requests are queued into `process_audio_task`
+   - text-only requests are queued into `process_text_task`
+5. Celery worker processes the task in background
+6. Worker:
+   - transcribes/refines if needed
+   - generates structured report
+   - stores encrypted data in PostgreSQL
+   - caches the result in Redis
+7. Frontend or client polls:
+   - `GET /api/v1/status/{job_id}`
+   - or `GET /api/v1/task-status/{task_id}`
+
+### 7. Report Retrieval / Dashboard Flow
+
+1. Frontend loads report history from `GET /api/v1/reports`
+2. Doctors only see their own reports
+3. Admins can:
+   - view all reports
+   - filter by doctor
+4. Search is applied across:
+   - transcription
+   - nested report fields
+5. Selected reports are rendered into the editable structured report panel
+
+### 8. PDF Export Flow
+
+1. Doctor clicks `Download PDF`
+2. Frontend converts the currently visible structured report into PDF
+3. Export logic:
+   - formats top-level headings larger and bold
+   - indents nested fields
+   - skips fields with `Not mentioned`
+   - includes transcription only when meaningful
+4. PDF is generated client-side using `jsPDF`
+
+## Technical Data Flow Summary
+
+- `React UI` handles interaction, editor state, routing, and PDF export
+- `FastAPI` handles auth, validation, API orchestration, and DB access
+- `PostgreSQL` stores encrypted users, reports, and logs
+- `Redis` handles cache, Celery broker, Celery result backend, and rate-limit counters
+- `Celery` handles background audio/text report jobs
+- `Hugging Face Inference API` handles MedASR refinement and LLM structured generation
+- `RadReport` is used as the external source for report template structure
+
+## Reliability / Performance Design
+
+- Heavy work is offloaded to Celery instead of blocking FastAPI routes
+- Redis connection pooling reduces repeated connection overhead
+- Celery tasks use retry with backoff for transient upstream failures
+- Rate limiting protects transcription-heavy endpoints from overload
+- Cached templates reduce repeated external template fetching
+- Cached audio/text hashes reduce duplicate reprocessing
+- Structured report fallback prevents blank report sections when the LLM output is weak
+
+## Core Features
 
 - Signup/login with JWT authentication
-- RBAC for `doctor` and `admin`
+- Role-based access control for `doctor` and `admin`
 - Admin doctor filtering
 - Search by report words
-- Redis caching
-- Celery async processing for `/process-audio`
-- AES encryption for stored transcription and report data
-- Structured editable report panel
-- PDF download with hierarchical formatting
-- Persistent dark mode using the `html.dark` class
+- AES-encrypted transcription and report storage
+- Editable structured report panel
+- PDF export with heading hierarchy and hidden `Not mentioned` fields
+- Persistent light/dark theme
+- Homepage plus separate report dashboard
+- Concurrent Celery-backed processing for audio and text report jobs
 
-## AI Architecture
+## Backend Architecture
 
-### Speech
+### Speech Pipeline
 
 - No local MedASR model loading
 - No `transformers.pipeline()` or `from_pretrained()` in runtime
-- `/transcribe-audio` uses Hugging Face Inference API with `HF_TOKEN`
-- MedASR refinement is called only once after the stop/upload event
+- `/transcribe-audio` uses Hugging Face Inference API via `HF_TOKEN`
+- MedASR refinement is called only after stop/upload, not on every interim transcript
+- `/transcribe-audio` returns:
+  - `raw_text`
+  - `refined_text`
+  - `status`
+  - `transcription` for compatibility
 
 ### Structured Report Generation
 
+- Findings are normalized and passed into a structured-report service
 - Study type is detected from findings text
 - Templates are fetched from `https://radreport.org` on demand
-- The first successful template is cached under `backend/templates/`
-- Structured output is generated through a Hugging Face gated model API
-- The same `HF_TOKEN` is used for MedASR and LLM access
+- First successful templates are cached under `backend/templates/`
+- Cached templates are preloaded into memory on backend startup
+- Structured output is generated through a Hugging Face gated LLM model
+- If the LLM output is weak or invalid, the backend falls back to a deterministic structured report instead of returning empty sections
+
+### Async Processing
+
+- `/process-audio` remains the same endpoint
+- Audio requests are queued into Celery background workers
+- Text-only findings submitted through `/process-audio` are also queued
+- `/status/{job_id}` remains available
+- `/task-status/{task_id}` is also available as a compatible alias
+
+### Concurrency and Reliability
+
+- Celery worker pool and concurrency are configurable through env vars
+- Redis is used as:
+  - Celery broker
+  - Celery result backend
+  - application cache layer
+- Redis uses connection pooling
+- Celery tasks track start state and use retry/backoff for external API failures
+- Per-user rate limiting protects transcription-heavy endpoints
 
 ## Main API Endpoints
 
@@ -128,6 +294,7 @@ You can also upload an audio file directly, or type findings manually and genera
 - `POST /api/v1/generate-structured-report`
 - `POST /api/v1/reports/save`
 - `GET /api/v1/status/{job_id}`
+- `GET /api/v1/task-status/{task_id}`
 - `GET /api/v1/reports`
 - `GET /api/v1/doctors`
 - `DELETE /api/v1/reports/{report_id}`
@@ -139,6 +306,7 @@ You can also upload an audio file directly, or type findings manually and genera
 - Backend: `http://localhost:9998`
 - PostgreSQL: `localhost:9999`
 - Redis: `localhost:6379`
+- Flower: `http://localhost:5555`
 
 ## Environment Files
 
@@ -151,7 +319,7 @@ Copy these before running:
 
 Important variables:
 
-- `DATABASE_URL=postgresql://postgres:postgres@localhost:9999/radiology_ai`
+- `DATABASE_URL=postgresql://postgres:root@localhost:9999/radiology_ai`
 - `REDIS_URL=redis://localhost:6379/0`
 - `CELERY_BROKER_URL=redis://localhost:6379/1`
 - `CELERY_RESULT_BACKEND=redis://localhost:6379/2`
@@ -161,6 +329,14 @@ Important variables:
 - `RADREPORT_BASE_URL=https://radreport.org`
 - `TEMPLATE_CACHE_DIR=E:/Dev Microsoft/ChatGPT/RadiologyAI/backend/templates`
 - `FRONTEND_URL=http://localhost:9997`
+- `CELERY_WORKER_CONCURRENCY=4`
+- `CELERY_WORKER_POOL=prefork`
+- `REDIS_MAX_CONNECTIONS=50`
+- `HF_REQUEST_TIMEOUT_SECONDS=120`
+- `HF_MAX_RETRIES=3`
+- `TRANSCRIPTION_RATE_LIMIT_COUNT=20`
+- `TRANSCRIPTION_RATE_LIMIT_WINDOW_SECONDS=300`
+- `FLOWER_PORT=5555`
 
 ## Requirements
 
@@ -169,7 +345,7 @@ Important variables:
 - PostgreSQL
 - Redis
 - Git
-- FFmpeg available on the machine if your input formats require it
+- FFmpeg available on the machine if your audio formats require it
 
 ## Setup
 
@@ -202,14 +378,14 @@ Create:
 
 - database: `radiology_ai`
 - username: `postgres`
-- password: `postgres`
+- password: `root`
 
 ### 4. Configure backend environment
 
 Edit `backend/.env` and set at minimum:
 
 ```env
-DATABASE_URL=postgresql://postgres:postgres@localhost:9999/radiology_ai
+DATABASE_URL=postgresql://postgres:root@localhost:9999/radiology_ai
 HF_TOKEN=your_huggingface_token
 FRONTEND_URL=http://localhost:9997
 ```
@@ -223,9 +399,9 @@ cd "E:\Dev Microsoft\ChatGPT\RadiologyAI"
 
 Alembic notes:
 
-- `backend/alembic.ini` is now aligned with the project database port `9999`
-- `backend/alembic/env.py` overrides the URL from `backend/.env`, so your real `.env` remains the source of truth
-- the current migration revision is:
+- `backend/alembic.ini` is aligned with project port `9999`
+- `backend/alembic/env.py` overrides the URL from `backend/.env`, so `.env` remains the source of truth
+- current migration revision:
   - `20260403_000001_initial_schema`
 
 ### 6. Start the backend
@@ -245,16 +421,28 @@ Health check:
 
 ### 7. Start the Celery worker
 
-Open a new terminal:
-
 ```powershell
 cd "E:\Dev Microsoft\ChatGPT\RadiologyAI"
 powershell -ExecutionPolicy Bypass -File .\run_worker.ps1
 ```
 
-### 8. Start the frontend
+The worker reads:
 
-Open another terminal:
+- `CELERY_WORKER_POOL`
+- `CELERY_WORKER_CONCURRENCY`
+
+### 8. Start Flower monitoring
+
+```powershell
+cd "E:\Dev Microsoft\ChatGPT\RadiologyAI"
+powershell -ExecutionPolicy Bypass -File .\run_flower.ps1
+```
+
+Flower:
+
+- `http://localhost:5555`
+
+### 9. Start the frontend
 
 ```powershell
 cd "E:\Dev Microsoft\ChatGPT\RadiologyAI\frontend"
@@ -265,33 +453,37 @@ Frontend:
 
 - `http://localhost:9997`
 
-## Dark Mode
-
-- Theme is controlled through the `<html>` element using the `dark` class
-- Theme persists with `localStorage`
-- A small script in `frontend/index.html` prevents flash on refresh
-- Light mode uses a monochrome palette for better readability
-
 ## Report UI
 
-- The structured report panel is editable
-- The top-level `Transcription` section is hidden from the report editor UI
-- `Save` updates or inserts the report into the left-side history immediately
+- Structured report panel is editable
+- Top-level `Transcription` section is hidden from the report editor UI
+- Save updates or inserts the report into the history list immediately
+- Search works across transcription and report content
 - Downloaded PDFs:
   - use larger bold headings for main sections
-  - use indented bullet-style nested subpoints
+  - use indented subpoints
   - skip values that are exactly `Not mentioned`
 
-## Notes
+## Theme / UI Notes
 
-- `/transcribe-audio` keeps the route name unchanged but now returns:
-  - `raw_text`
-  - `refined_text`
-  - `status`
-  - `transcription` for compatibility
-- `/process-audio` still exists and still supports async job processing
-- Templates are no longer manually maintained study-by-study; they are cached as they are first used
-- If RadReport fetch/parsing fails for a study, the backend falls back to a minimal inferred structure instead of crashing
+- Theme is controlled through the `html.dark` class
+- Theme persists with `localStorage`
+- A small script in `frontend/index.html` prevents flash on refresh
+- Light mode uses a monochrome palette for visibility
+- Homepage is separate from the report dashboard
+
+## Concurrency Notes
+
+- The current backend is much safer for multiple doctors sending requests concurrently than before
+- Heavy work is queued instead of running inline in request handlers
+- Celery retries external API calls
+- Redis connection pooling reduces reconnect overhead
+- Rate limiting prevents a single user from overwhelming transcription routes
+
+Practical note:
+
+- On Windows, Celery `prefork` can still be less robust than Linux/WSL for production-style concurrency
+- For the strongest multi-doctor throughput, run workers on Linux or WSL if possible
 
 ## Common Commands
 
@@ -314,6 +506,13 @@ powershell -ExecutionPolicy Bypass -File .\run_backend.ps1
 ```powershell
 cd "E:\Dev Microsoft\ChatGPT\RadiologyAI"
 powershell -ExecutionPolicy Bypass -File .\run_worker.ps1
+```
+
+### Start Flower
+
+```powershell
+cd "E:\Dev Microsoft\ChatGPT\RadiologyAI"
+powershell -ExecutionPolicy Bypass -File .\run_flower.ps1
 ```
 
 ### Start frontend
