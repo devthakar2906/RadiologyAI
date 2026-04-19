@@ -9,6 +9,8 @@ def build_prompt(template: dict, findings: str) -> str:
         f"TEMPLATE:\n{template_json}\n\n"
         f"FINDINGS:\n{findings}\n\n"
         "INSTRUCTIONS:\n"
+        '- Add a top-level "_meta" object with a "template_name" field.\n'
+        '- The "template_name" must be a short, professional radiology template/report name that best matches the findings.\n'
         "- Fill all fields\n"
         "- If missing, write 'Not mentioned'\n"
         "- Keep language clinically concise\n"

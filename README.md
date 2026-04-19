@@ -57,7 +57,7 @@ powershell -ExecutionPolicy Bypass -File .\run_flower.ps1
 ## Stack
 
 - Backend: FastAPI, PostgreSQL, SQLAlchemy, Redis, Celery, JWT auth, AES encryption, Alembic
-- Speech: browser live transcription for UI responsiveness, Hugging Face Inference API for MedASR refinement
+- Speech: browser live transcription for UI responsiveness, Hugging Face Inference API for remote ASR/transcription refinement
 - Structured reporting: Hugging Face gated LLM API with RadReport-based template caching
 - Frontend: React, Vite, Tailwind CSS, Quill, jsPDF
 - Monitoring: Flower for Celery task visibility
@@ -132,15 +132,17 @@ Text-only usage is also supported: findings can be typed directly and converted 
 1. When the doctor clicks `Stop Mic`, the browser finalizes the recording
 2. The recorded audio file is sent to `POST /api/v1/transcribe-audio`
 3. Backend rate-limits the request per user
-4. Backend sends audio to Hugging Face Inference API using `google/medasr`
-5. If `raw_text` is already available from browser speech recognition, backend uses it as the initial base
-6. Backend runs one refinement pass through MedASR-style prompting
+4. Backend transcodes uploaded audio to a Hugging Face-friendly WAV format when possible
+5. Backend first tries remote ASR with `google/medasr`
+6. If MedASR is not deployed on Hugging Face Inference for the current account/provider path, backend automatically falls back to `openai/whisper-large-v3-turbo`
+7. If `raw_text` is already available from browser speech recognition, backend keeps it as the base `raw_text`
+8. The final refined text returned to the UI comes from the remote ASR result
 7. Backend returns:
    - `raw_text`
    - `refined_text`
    - `status`
    - `transcription`
-8. Frontend updates the editor with the refined text
+9. Frontend updates the editor with the refined text
 
 ### 4. Text-to-Structured-Report Flow
 
@@ -216,7 +218,7 @@ Text-only usage is also supported: findings can be typed directly and converted 
 - `PostgreSQL` stores encrypted users, reports, and logs
 - `Redis` handles cache, Celery broker, Celery result backend, and rate-limit counters
 - `Celery` handles background audio/text report jobs
-- `Hugging Face Inference API` handles MedASR refinement and LLM structured generation
+- `Hugging Face Inference API` handles remote ASR and LLM structured generation
 - `RadReport` is used as the external source for report template structure
 
 ## Reliability / Performance Design
@@ -246,10 +248,12 @@ Text-only usage is also supported: findings can be typed directly and converted 
 
 ### Speech Pipeline
 
-- No local MedASR model loading
+- No local MedASR or Whisper model loading
 - No `transformers.pipeline()` or `from_pretrained()` in runtime
 - `/transcribe-audio` uses Hugging Face Inference API via `HF_TOKEN`
-- MedASR refinement is called only after stop/upload, not on every interim transcript
+- `google/medasr` is attempted first as a remote API model
+- if MedASR returns a deployment/provider 404, backend falls back automatically to remote `openai/whisper-large-v3-turbo`
+- no ASR model weights are downloaded or run locally by the backend
 - `/transcribe-audio` returns:
   - `raw_text`
   - `refined_text`
@@ -324,6 +328,7 @@ Important variables:
 - `CELERY_BROKER_URL=redis://localhost:6379/1`
 - `CELERY_RESULT_BACKEND=redis://localhost:6379/2`
 - `STT_MODEL=google/medasr`
+- `STT_FALLBACK_MODEL=openai/whisper-large-v3-turbo`
 - `HF_TOKEN=...`
 - `LLM_MODEL=meta-llama/Llama-3.3-70B-Instruct`
 - `RADREPORT_BASE_URL=https://radreport.org`
@@ -389,6 +394,12 @@ DATABASE_URL=postgresql://postgres:root@localhost:9999/radiology_ai
 HF_TOKEN=your_huggingface_token
 FRONTEND_URL=http://localhost:9997
 ```
+
+Speech-model note:
+
+- `STT_MODEL` is the preferred remote transcription model
+- `STT_FALLBACK_MODEL` is used automatically if the preferred model is not deployed through Hugging Face Inference
+- both are used through remote HTTP API calls only, not local model loading
 
 ### 5. Run database migrations
 
@@ -457,9 +468,13 @@ Frontend:
 
 - Structured report panel is editable
 - Top-level `Transcription` section is hidden from the report editor UI
+- Structured report header shows the template name and generated IST timestamp
 - Save updates or inserts the report into the history list immediately
-- Search works across transcription and report content
+- Search works across template name, study type, transcription, and report content
+- Report history titles can show `Template Name - Study Type`
 - Downloaded PDFs:
+  - use the template name as the PDF title
+  - print the generated IST timestamp near the top
   - use larger bold headings for main sections
   - use indented subpoints
   - skip values that are exactly `Not mentioned`

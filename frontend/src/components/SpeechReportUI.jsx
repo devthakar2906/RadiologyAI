@@ -125,6 +125,9 @@ export default function SpeechReportUI({ onReportReady, theme = "dark" }) {
         setTranscript(nextTranscript);
         setJobState("refined");
         toast.success("Transcript refined from full audio");
+      } else {
+        setJobState("failed");
+        toast.error("No transcription text was returned for this audio file.");
       }
     } catch (error) {
       setJobState("failed");
@@ -179,7 +182,9 @@ export default function SpeechReportUI({ onReportReady, theme = "dark" }) {
         id: crypto.randomUUID(),
         transcription: cleanedTranscript,
         report: data.structured_json,
-        template: data.study_type,
+        template: data.template_name || data.study_type,
+        template_name: data.template_name || data.study_type,
+        generated_at_ist: data.generated_at_ist,
         study_type: data.study_type,
         formatted_report: data.formatted_report,
         user_id: null,

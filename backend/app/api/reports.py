@@ -1,6 +1,8 @@
 import json
+from datetime import timezone
 from pathlib import Path
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from celery.result import AsyncResult
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
@@ -36,15 +38,52 @@ settings = get_settings()
 router = APIRouter(tags=["reports"])
 
 
+def _first_non_empty(*values: str | None) -> str:
+    for value in values:
+        if value and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def _derive_template_name(report_sections: dict[str, object], study_type: str | None) -> str:
+    impression = _first_non_empty(
+        report_sections.get("Impression") if isinstance(report_sections, dict) else "",
+        report_sections.get("Findings") if isinstance(report_sections, dict) else "",
+    )
+    text = impression.lower()
+
+    keyword_map = [
+        ("hemorrhage", "Hemorrhage Report"),
+        ("infarct", "Infarct Report"),
+        ("stroke", "Stroke Report"),
+        ("fracture", "Fracture Report"),
+        ("disc", "Disc Disease Report"),
+        ("degenerative", "Degenerative Changes Report"),
+        ("mass", "Mass Lesion Report"),
+        ("lesion", "Lesion Report"),
+        ("effusion", "Effusion Report"),
+        ("pneumonia", "Pneumonia Report"),
+    ]
+    suffix = next((label for keyword, label in keyword_map if keyword in text), "Structured Report")
+    if study_type and study_type != "General Radiology":
+        return f"{study_type} {suffix}"
+    return study_type or suffix
+
+
 def _serialize_report(report: Report) -> ReportResponse:
     report_sections = json.loads(decrypt_text(report.report))
+    metadata = report_sections.get("_meta", {}) if isinstance(report_sections, dict) else {}
     inferred_study_type = _infer_study_type_from_sections(report_sections)
+    template_name = metadata.get("template_name") or _derive_template_name(report_sections, inferred_study_type)
+    generated_at_ist = metadata.get("generated_at_ist") or _format_ist(report.created_at)
     return ReportResponse(
         id=report.id,
         user_id=report.user_id,
         transcription=decrypt_text(report.transcription),
         report=report_sections,
-        template=None,
+        template=template_name,
+        template_name=template_name,
+        generated_at_ist=generated_at_ist,
         formatted_report=format_report(report_sections),
         study_type=inferred_study_type,
         audio_hash=report.audio_hash,
@@ -126,6 +165,8 @@ async def generate_structured_report_endpoint(
         structured_json=result["structured_json"],
         formatted_report=result["formatted_report"],
         study_type=result["study_type"],
+        template_name=result["template_name"],
+        generated_at_ist=result["generated_at_ist"],
     )
 
 
@@ -152,8 +193,9 @@ async def transcribe_audio_endpoint(
     destination.write_bytes(content)
 
     try:
-        raw_transcription = (raw_text or "").strip() or await transcribe_audio_async(str(destination))
-        refined_transcription = await refine_with_medasr_async(raw_transcription)
+        uploaded_audio_transcription = await transcribe_audio_async(str(destination))
+        raw_transcription = (raw_text or "").strip() or uploaded_audio_transcription
+        refined_transcription = uploaded_audio_transcription or await refine_with_medasr_async(raw_transcription)
         return TranscriptionResponse(
             raw_text=raw_transcription,
             refined_text=refined_transcription,
@@ -209,7 +251,15 @@ def list_reports(
             return [str(node)]
 
         def matches(report: ReportResponse) -> bool:
-            haystack = " ".join([report.transcription, *flatten_values(report.report)]).lower()
+            haystack = " ".join(
+                [
+                    report.transcription,
+                    report.template_name or "",
+                    report.template or "",
+                    report.study_type or "",
+                    *flatten_values(report.report),
+                ]
+            ).lower()
             return all(token in haystack for token in tokens)
 
         serialized = [report for report in serialized if matches(report)]
@@ -218,12 +268,19 @@ def list_reports(
 
 
 def _infer_study_type_from_sections(report_sections: dict[str, str]) -> str | None:
-    keys = set(report_sections.keys())
+    keys = {key for key in report_sections.keys() if key != "_meta"}
     if {"Technique", "Findings", "Impression"}.issubset(keys):
         return "Structured Radiology"
     if {"Alignment & Curvature", "Vertebral Bodies", "Intervertebral Discs", "Spinal Canal & Nerves", "Facet Joints"}.issubset(keys):
         return "MRI Spine"
     return "General Radiology"
+
+
+def _format_ist(value) -> str:
+    dt = value
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(ZoneInfo("Asia/Kolkata")).strftime("%d/%m/%Y %I:%M %p IST")
 
 
 def _build_task_status_response(job_id: str, result: AsyncResult) -> JobStatusResponse:

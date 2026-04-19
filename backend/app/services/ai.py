@@ -1,10 +1,16 @@
 import asyncio
 import html
-import mimetypes
 import re
+import shutil
+import subprocess
+import wave
+from array import array
+from functools import lru_cache
 from pathlib import Path
 
-import httpx
+import numpy as np
+import torch
+from transformers import AutoModelForCTC, AutoProcessor
 
 from app.core.config import get_settings
 
@@ -19,66 +25,98 @@ def clean_transcription_text(value: str) -> str:
     return text
 
 
-def _get_headers(content_type: str = "application/json") -> dict[str, str]:
-    if not settings.hf_token:
-        raise RuntimeError("HF_TOKEN is not configured.")
-    return {
-        "Authorization": f"Bearer {settings.hf_token}",
-        "Content-Type": content_type,
-    }
+def _transcode_audio_to_wav(audio_file: Path) -> Path:
+    ffmpeg_path = getattr(settings, "ffmpeg_path", None) or shutil.which("ffmpeg")
+    if not ffmpeg_path:
+        raise RuntimeError("FFMPEG_PATH is not configured and ffmpeg is not available on PATH.")
+
+    wav_path = audio_file.with_suffix(f"{audio_file.suffix}.medasr.wav")
+    subprocess.run(
+        [
+            ffmpeg_path,
+            "-y",
+            "-i",
+            str(audio_file),
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-f",
+            "wav",
+            str(wav_path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return wav_path
 
 
-def _parse_generated_text(payload) -> str:
-    if isinstance(payload, dict):
-        if isinstance(payload.get("text"), str):
-            return payload["text"]
-        if isinstance(payload.get("generated_text"), str):
-            return payload["generated_text"]
-        if "error" in payload:
-            raise RuntimeError(str(payload["error"]))
+def _read_wav_as_float_samples(wav_path: Path) -> np.ndarray:
+    with wave.open(str(wav_path), "rb") as wav_file:
+        sample_width = wav_file.getsampwidth()
+        channels = wav_file.getnchannels()
+        sample_rate = wav_file.getframerate()
+        frames = wav_file.readframes(wav_file.getnframes())
 
-    if isinstance(payload, list):
-        for item in payload:
-            if isinstance(item, dict):
-                if isinstance(item.get("text"), str):
-                    return item["text"]
-                if isinstance(item.get("generated_text"), str):
-                    return item["generated_text"]
+    if sample_width != 2:
+        raise RuntimeError(f"Unsupported sample width for MedASR input: {sample_width}")
+    if channels != 1:
+        raise RuntimeError(f"Expected mono audio for MedASR input, received {channels} channels")
+    if sample_rate != 16000:
+        raise RuntimeError(f"Expected 16kHz audio for MedASR input, received {sample_rate}Hz")
 
-    if isinstance(payload, str):
-        return payload
-
-    raise RuntimeError("Unexpected response from Hugging Face API.")
+    pcm = array("h")
+    pcm.frombytes(frames)
+    return np.asarray(pcm, dtype=np.float32) / 32768.0
 
 
-async def _request_with_retry(*, content=None, json_body=None, content_type: str) -> str:
-    last_error: Exception | None = None
+@lru_cache(maxsize=1)
+def _get_processor():
+    return AutoProcessor.from_pretrained(
+        settings.stt_model,
+        token=settings.hf_token,
+        trust_remote_code=True,
+        cache_dir=settings.stt_local_cache_dir,
+    )
 
-    for attempt in range(settings.hf_max_retries):
-        try:
-            async with httpx.AsyncClient(timeout=settings.hf_request_timeout_seconds) as client:
-                response = await client.post(
-                    f"https://api-inference.huggingface.co/models/{settings.stt_model}",
-                    headers=_get_headers(content_type),
-                    params={"wait_for_model": "true"},
-                    content=content,
-                    json=json_body,
-                )
-                response.raise_for_status()
-                return clean_transcription_text(_parse_generated_text(response.json()))
-        except Exception as exc:
-            last_error = exc
-            if attempt == settings.hf_max_retries - 1:
-                break
-            await asyncio.sleep(min(2 ** attempt, 8))
 
-    raise RuntimeError(f"Hugging Face request failed: {last_error}") from last_error
+@lru_cache(maxsize=1)
+def _get_model():
+    model = AutoModelForCTC.from_pretrained(
+        settings.stt_model,
+        token=settings.hf_token,
+        trust_remote_code=True,
+        cache_dir=settings.stt_local_cache_dir,
+    )
+    model.eval()
+    return model
+
+
+def _transcribe_audio_local(audio_path: str) -> str:
+    audio_file = Path(audio_path)
+    wav_path = _transcode_audio_to_wav(audio_file)
+    try:
+        speech = _read_wav_as_float_samples(wav_path)
+        processor = _get_processor()
+        model = _get_model()
+
+        inputs = processor(
+            speech,
+            sampling_rate=16000,
+            return_tensors="pt",
+            padding=True,
+        )
+        with torch.no_grad():
+            outputs = model(**inputs)
+            predicted_ids = torch.argmax(outputs.logits, dim=-1)
+        decoded = processor.batch_decode(predicted_ids)[0]
+        return clean_transcription_text(decoded)
+    finally:
+        wav_path.unlink(missing_ok=True)
 
 
 async def transcribe_audio_async(audio_path: str) -> str:
-    audio_file = Path(audio_path)
-    mime_type = mimetypes.guess_type(audio_file.name)[0] or "application/octet-stream"
-    return await _request_with_retry(content=audio_file.read_bytes(), content_type=mime_type)
+    return await asyncio.to_thread(_transcribe_audio_local, audio_path)
 
 
 def transcribe_audio(audio_path: str) -> str:
@@ -86,8 +124,6 @@ def transcribe_audio(audio_path: str) -> str:
 
 
 async def refine_with_medasr_async(text: str) -> str:
-    # MedASR is an ASR model, so text-only "refinement" should stay lightweight
-    # and deterministic instead of sending unsupported prompt-generation calls.
     return clean_transcription_text(text)
 
 

@@ -18,6 +18,9 @@ function ensurePage(doc, y, needed = 16) {
 
 function renderEntries(doc, node, y, depth = 0) {
   Object.entries(node || {}).forEach(([section, value]) => {
+    if (section === "_meta") {
+      return;
+    }
     if (!isMeaningfulNode(value)) {
       return;
     }
@@ -54,11 +57,19 @@ function renderEntries(doc, node, y, depth = 0) {
 
 export function exportReportPdf(report) {
   const doc = new jsPDF();
+  const templateName = report.template_name || report.template || report.study_type || "Radiology Report";
+  const generatedAt = report.generated_at_ist || (report.created_at ? `${new Date(report.created_at).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })} IST` : "");
   doc.setFont("helvetica", "bold");
   doc.setFontSize(18);
-  doc.text("Radiology Report", 20, 20);
+  doc.text(templateName, 20, 20);
 
-  let y = 34;
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(11);
+  if (generatedAt) {
+    doc.text(generatedAt, 20, 28);
+  }
+
+  let y = generatedAt ? 40 : 34;
   y = renderEntries(doc, report.report || {}, y, 0);
 
   if (report.transcription && isMeaningfulNode(report.transcription)) {
@@ -75,5 +86,6 @@ export function exportReportPdf(report) {
     doc.text(transcriptionLines, 24, y);
   }
 
-  doc.save(`radiology-report-${report.id}.pdf`);
+  const safeName = templateName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "radiology-report";
+  doc.save(`${safeName}-${report.id}.pdf`);
 }

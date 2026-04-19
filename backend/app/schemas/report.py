@@ -11,6 +11,8 @@ class ReportResponse(BaseModel):
     transcription: str
     report: dict[str, Any]
     template: str | None = None
+    template_name: str | None = None
+    generated_at_ist: str | None = None
     formatted_report: str | None = None
     study_type: str | None = None
     audio_hash: str
@@ -57,3 +59,5 @@ class GenerateStructuredReportResponse(BaseModel):
     structured_json: dict[str, Any]
     formatted_report: str
     study_type: str
+    template_name: str | None = None
+    generated_at_ist: str | None = None

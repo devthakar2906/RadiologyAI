@@ -4,6 +4,8 @@ def format_report(report_json: dict) -> str:
     def walk(node):
         if isinstance(node, dict):
             for key, value in node.items():
+                if key == "_meta":
+                    continue
                 lines.append(f"{key}:")
                 walk(value)
         else:

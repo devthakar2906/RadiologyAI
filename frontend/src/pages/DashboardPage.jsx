@@ -134,7 +134,7 @@ export default function DashboardPage() {
 
   const renderReportFields = (node, path = [], depth = 0) =>
     Object.entries(node)
-      .filter(([section]) => !(depth === 0 && section === "Transcription"))
+      .filter(([section]) => !(depth === 0 && (section === "Transcription" || section === "_meta")))
       .map(([section, value]) => {
       const nextPath = [...path, section];
       const titleClass = depth === 0 ? "section-title section-title-main" : "section-title section-title-sub";
@@ -164,6 +164,14 @@ export default function DashboardPage() {
     });
 
   const getPreviewText = (report) => {
+    const templateTitle = report.template_name || report.template || "";
+    const studyTitle = report.study_type || "";
+    if (templateTitle && studyTitle && templateTitle !== studyTitle) {
+      return `${templateTitle} - ${studyTitle}`;
+    }
+    if (templateTitle || studyTitle) {
+      return templateTitle || studyTitle;
+    }
     const flatten = (node) => {
       if (node && typeof node === "object" && !Array.isArray(node)) {
         return Object.values(node).flatMap(flatten);
@@ -299,6 +307,15 @@ export default function DashboardPage() {
           <h2 className="text-2xl font-bold text-slate-900 dark:text-white">Structured Report</h2>
           {editableReport ? (
             <div className="mt-6 space-y-5">
+              <div className="rounded-2xl border border-slate-200 bg-slate-50/80 px-4 py-3 dark:border-white/10 dark:bg-slate-900/70">
+                <p className="text-xs uppercase tracking-[0.22em] text-slate-500 dark:text-slate-400">Template</p>
+                <p className="mt-1 text-lg font-semibold text-slate-900 dark:text-white">
+                  {editableReport.template_name || editableReport.template || editableReport.study_type || "Structured Radiology"}
+                </p>
+                <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+                  {editableReport.generated_at_ist || (editableReport.created_at ? new Date(editableReport.created_at).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }) + " IST" : "")}
+                </p>
+              </div>
               {renderReportFields(editableReport.report)}
               <div className="flex gap-3">
                 <button className="primary-button flex-1" onClick={handleSaveReport} disabled={isSavingReport}>

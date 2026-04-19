@@ -27,8 +27,11 @@ class Settings(BaseSettings):
         alias="ENCRYPTION_KEY",
     )
     stt_model: str = Field(default="google/medasr", alias="STT_MODEL")
+    stt_fallback_model: str = Field(default="openai/whisper-large-v3-turbo", alias="STT_FALLBACK_MODEL")
+    stt_local_cache_dir: str = Field(default=str(BASE_DIR / ".hf-cache"), alias="STT_LOCAL_CACHE_DIR")
     llm_model: str = Field(default="meta-llama/Llama-3.3-70B-Instruct", alias="LLM_MODEL")
     hf_token: str | None = Field(default=None, alias="HF_TOKEN")
+    ffmpeg_path: str | None = Field(default=None, alias="FFMPEG_PATH")
     radreport_base_url: str = Field(default="https://radreport.org", alias="RADREPORT_BASE_URL")
     template_cache_dir: str = Field(default=str(BASE_DIR / "templates"), alias="TEMPLATE_CACHE_DIR")
     uploads_dir: str = Field(default=str(BASE_DIR / "uploads"), alias="UPLOADS_DIR")
@@ -54,4 +57,5 @@ def get_settings() -> Settings:
     settings = Settings()
     Path(settings.uploads_dir).mkdir(parents=True, exist_ok=True)
     Path(settings.template_cache_dir).mkdir(parents=True, exist_ok=True)
+    Path(settings.stt_local_cache_dir).mkdir(parents=True, exist_ok=True)
     return settings

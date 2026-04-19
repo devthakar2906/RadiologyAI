@@ -1,4 +1,6 @@
 import hashlib
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from app.services.ai import clean_transcription_text
 from app.services.formatter import format_report
@@ -85,6 +87,7 @@ async def generate_structured_report(findings: str) -> dict:
     template, template_source = await get_template(study_type, cleaned)
     prompt = build_prompt(template, cleaned)
     generated_json = await _generate_with_retry(prompt)
+    llm_metadata = generated_json.get("_meta", {}) if isinstance(generated_json, dict) else {}
     structured = _fill_missing(template, generated_json)
 
     # If the model returns empty or unusable content, fall back to a deterministic
@@ -92,11 +95,20 @@ async def generate_structured_report(findings: str) -> dict:
     if _all_not_mentioned(structured):
         structured = _heuristic_fill(template, cleaned)
 
+    llm_template_name = str(llm_metadata.get("template_name") or "").strip()
+    template_name = llm_template_name or template_source or study_type
+    generated_at_ist = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%d/%m/%Y %I:%M %p IST")
+    structured["_meta"] = {
+        "template_name": template_name,
+        "generated_at_ist": generated_at_ist,
+    }
     structured["Transcription"] = cleaned or "Not mentioned"
 
     return {
         "study_type": study_type,
         "template": template_source,
+        "template_name": template_name,
+        "generated_at_ist": generated_at_ist,
         "structured_json": structured,
         "formatted_report": format_report(structured),
         "input_hash": hashlib.sha256(cleaned.encode("utf-8")).hexdigest(),
