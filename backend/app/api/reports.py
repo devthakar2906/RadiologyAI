@@ -5,6 +5,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from celery.result import AsyncResult
+from cryptography.exceptions import InvalidTag
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
@@ -74,7 +75,8 @@ def _serialize_report(report: Report) -> ReportResponse:
     report_sections = json.loads(decrypt_text(report.report))
     metadata = report_sections.get("_meta", {}) if isinstance(report_sections, dict) else {}
     inferred_study_type = _infer_study_type_from_sections(report_sections)
-    template_name = metadata.get("template_name") or _derive_template_name(report_sections, inferred_study_type)
+    fallback_study_type = inferred_study_type if inferred_study_type not in {"Structured Radiology", "General Radiology"} else None
+    template_name = metadata.get("template_name") or _derive_template_name(report_sections, fallback_study_type)
     generated_at_ist = metadata.get("generated_at_ist") or _format_ist(report.created_at)
     return ReportResponse(
         id=report.id,
@@ -89,6 +91,13 @@ def _serialize_report(report: Report) -> ReportResponse:
         audio_hash=report.audio_hash,
         created_at=report.created_at,
     )
+
+
+def _safe_serialize_report(report: Report) -> ReportResponse | None:
+    try:
+        return _serialize_report(report)
+    except (InvalidTag, ValueError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
 
 
 def _has_active_worker() -> bool:
@@ -237,7 +246,7 @@ def list_reports(
     elif doctor_id:
         query = query.where(Report.user_id == doctor_id)
     reports = db.scalars(query.order_by(Report.created_at.desc())).all()
-    serialized = [_serialize_report(report) for report in reports]
+    serialized = [serialized_report for report in reports if (serialized_report := _safe_serialize_report(report)) is not None]
 
     if search:
         tokens = [token.lower() for token in search.split() if token.strip()]
@@ -343,6 +352,11 @@ def update_report(
             return str(node or "")
 
         cleaned_report = sanitize_report(payload.report)
+        meta = cleaned_report.get("_meta", {}) if isinstance(cleaned_report.get("_meta"), dict) else {}
+        if payload.title and payload.title.strip():
+            meta["template_name"] = payload.title.strip()
+        if meta:
+            cleaned_report["_meta"] = meta
         if not report:
             report = Report(
                 user_id=current_user.id,
@@ -386,6 +400,11 @@ def save_report(
             return str(node or "")
 
         cleaned_report = sanitize_report(payload.report)
+        meta = cleaned_report.get("_meta", {}) if isinstance(cleaned_report.get("_meta"), dict) else {}
+        if payload.title and payload.title.strip():
+            meta["template_name"] = payload.title.strip()
+        if meta:
+            cleaned_report["_meta"] = meta
         if not report:
             report = Report(
                 user_id=current_user.id,

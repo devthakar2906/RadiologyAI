@@ -141,6 +141,43 @@ html.dark .icon-button {
   gap: 0.75rem;
 }
 
+.report-scroll-panel {
+  max-height: calc(100vh - 3rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(100, 116, 139, 0.45) transparent;
+}
+
+.report-scroll-panel::-webkit-scrollbar {
+  width: 8px;
+}
+
+.report-scroll-panel::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.report-scroll-panel::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.35);
+  border-radius: 999px;
+}
+
+.report-scroll-panel::-webkit-scrollbar-thumb:hover {
+  background: rgba(71, 85, 105, 0.48);
+}
+
+html.dark .report-scroll-panel {
+  scrollbar-color: rgba(148, 163, 184, 0.4) transparent;
+}
+
+html.dark .report-scroll-panel::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.32);
+}
+
+html.dark .report-scroll-panel::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.48);
+}
+
 html.dark .stat-card,
 html.dark .report-row {
   border-color: rgba(255, 255, 255, 0.08);

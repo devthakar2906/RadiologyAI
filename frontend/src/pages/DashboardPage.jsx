@@ -1,4 +1,4 @@
-import { Moon, Search, Sun, Trash2, FileDown, LogOut } from "lucide-react";
+import { Moon, Search, Sun, Trash2, FileDown, LogOut, Pencil, Check, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import toast from "react-hot-toast";
 import api from "../api/client";
@@ -17,6 +17,8 @@ export default function DashboardPage() {
   const [doctorOptions, setDoctorOptions] = useState([]);
   const [doctorFilter, setDoctorFilter] = useState("");
   const [isSavingReport, setIsSavingReport] = useState(false);
+  const [editingTitleId, setEditingTitleId] = useState(null);
+  const [editingTitleValue, setEditingTitleValue] = useState("");
 
   useEffect(() => {
     const root = document.documentElement;
@@ -99,7 +101,8 @@ export default function DashboardPage() {
       const { data } = await api.post(`/reports/save`, {
         report_id: editableReport.id || null,
         transcription: editableReport.transcription,
-        report: editableReport.report
+        report: editableReport.report,
+        title: editableReport.template_name || editableReport.template || editableReport.study_type || null,
       });
       setEditableReport(data);
       setSelectedReport(data);
@@ -116,6 +119,45 @@ export default function DashboardPage() {
       toast.error(error.response?.data?.detail || "Failed to save report");
     } finally {
       setIsSavingReport(false);
+    }
+  };
+
+  const startEditHistoryTitle = (report) => {
+    setEditingTitleId(report.id);
+    setEditingTitleValue(report.template_name || report.template || getPreviewText(report));
+  };
+
+  const cancelEditHistoryTitle = () => {
+    setEditingTitleId(null);
+    setEditingTitleValue("");
+  };
+
+  const handleEditHistoryTitle = async (report) => {
+    const nextTitle = editingTitleValue.trim();
+    const currentTitle = report.template_name || report.template || getPreviewText(report);
+    if (!nextTitle || nextTitle === currentTitle) {
+      cancelEditHistoryTitle();
+      return;
+    }
+
+    try {
+      const { data } = await api.post("/reports/save", {
+        report_id: report.id,
+        transcription: report.transcription,
+        report: report.report,
+        title: nextTitle,
+      });
+      setReports((current) => current.map((item) => (item.id === data.id ? data : item)));
+      if (selectedReport?.id === data.id) {
+        setSelectedReport(data);
+      }
+      if (editableReport?.id === data.id) {
+        setEditableReport(data);
+      }
+      cancelEditHistoryTitle();
+      toast.success("Report title updated");
+    } catch (error) {
+      toast.error(error.response?.data?.detail || "Failed to update report title");
     }
   };
 
@@ -165,12 +207,18 @@ export default function DashboardPage() {
 
   const getPreviewText = (report) => {
     const templateTitle = report.template_name || report.template || "";
-    const studyTitle = report.study_type || "";
+    const studyTitle =
+      report.study_type && !["Structured Radiology", "General Radiology"].includes(report.study_type)
+        ? report.study_type
+        : "";
     if (templateTitle && studyTitle && templateTitle !== studyTitle) {
       return `${templateTitle} - ${studyTitle}`;
     }
-    if (templateTitle || studyTitle) {
-      return templateTitle || studyTitle;
+    if (templateTitle) {
+      return templateTitle;
+    }
+    if (studyTitle) {
+      return studyTitle;
     }
     const flatten = (node) => {
       if (node && typeof node === "object" && !Array.isArray(node)) {
@@ -287,12 +335,36 @@ export default function DashboardPage() {
               {loading ? <div className="spinner" /> : null}
               {reports.map((report) => (
                 <div key={report.id} className="report-row">
-                  <button className="flex-1 text-left" onClick={() => setSelectedReport(report)}>
-                    <p className="font-medium text-slate-900 dark:text-white">{getPreviewText(report)}</p>
-                    <p className="mt-1 text-xs text-slate-400">{new Date(report.created_at).toLocaleString()}</p>
-                  </button>
+                  <div className="flex-1">
+                    {editingTitleId === report.id ? (
+                      <div className="space-y-2">
+                        <input
+                          className="input"
+                          value={editingTitleValue}
+                          onChange={(event) => setEditingTitleValue(event.target.value)}
+                          autoFocus
+                        />
+                        <div className="flex gap-2">
+                          <button className="icon-button" onClick={() => handleEditHistoryTitle(report)}>
+                            <Check size={16} />
+                          </button>
+                          <button className="icon-button" onClick={cancelEditHistoryTitle}>
+                            <X size={16} />
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <button className="w-full text-left" onClick={() => setSelectedReport(report)}>
+                        <p className="font-medium text-slate-900 dark:text-white">{getPreviewText(report)}</p>
+                        <p className="mt-1 text-xs text-slate-400">{new Date(report.created_at).toLocaleString()}</p>
+                      </button>
+                    )}
+                  </div>
                   <button className="icon-button" onClick={() => exportReportPdf(report)}>
                     <FileDown size={16} />
+                  </button>
+                  <button className="icon-button" onClick={() => startEditHistoryTitle(report)}>
+                    <Pencil size={16} />
                   </button>
                   <button className="icon-button" onClick={() => handleDelete(report.id)}>
                     <Trash2 size={16} />
@@ -303,7 +375,7 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        <aside className="panel sticky top-6 h-fit">
+        <aside className="panel report-scroll-panel sticky top-6 h-fit">
           <h2 className="text-2xl font-bold text-slate-900 dark:text-white">Structured Report</h2>
           {editableReport ? (
             <div className="mt-6 space-y-5">

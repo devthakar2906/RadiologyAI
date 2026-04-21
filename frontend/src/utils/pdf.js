@@ -18,7 +18,7 @@ function ensurePage(doc, y, needed = 16) {
 
 function renderEntries(doc, node, y, depth = 0) {
   Object.entries(node || {}).forEach(([section, value]) => {
-    if (section === "_meta") {
+    if (section === "_meta" || section === "Transcription") {
       return;
     }
     if (!isMeaningfulNode(value)) {

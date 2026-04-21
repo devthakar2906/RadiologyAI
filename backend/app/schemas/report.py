@@ -49,6 +49,7 @@ class ReportUpdateRequest(BaseModel):
     report_id: UUID | None = None
     transcription: str
     report: dict[str, Any]
+    title: str | None = None
 
 
 class GenerateStructuredReportRequest(BaseModel):
